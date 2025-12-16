@@ -280,145 +280,108 @@ pipeline {
             }
         }
 
-        stage('Lint & Code Quality') {
+        stage('Validate & Code Quality') {
             steps {
                 script {
-                    echo "🔍 Running linting and code quality checks..."
-                    def lintResult = sh(
-                        script: '''
-                            if grep -q '"lint"' package.json; then
-                                npm run lint
-                            else
-                                echo "⚠️ No lint script found in package.json, skipping linting..."
-                                exit 0
-                            fi
-                        ''',
-                        returnStatus: true
-                    )
-                    
-                    if (lintResult != 0) {
-                        error("Linting checks failed! Please fix the issues before merging.")
-                    } else {
-                        echo "✅ Linting passed"
-                    }
-                }
-            }
-        }
-
-        stage('Type Check') {
-            steps {
-                script {
-                    echo "🔎 Running TypeScript type checking..."
-                    def typeCheckResult = sh(
-                        script: '''
-                            # Check if TypeScript is in dependencies
-                            if grep -q '"typescript"' package.json || [ -f tsconfig.json ]; then
-                                # Try npm run type-check first
-                                if grep -q '"type-check"' package.json; then
-                                    npm run type-check
-                                else
-                                    # Fallback to direct tsc
-                                    npx tsc --noEmit || exit 0
-                                fi
-                            else
-                                echo "⚠️ No TypeScript found, skipping type check..."
-                                exit 0
-                            fi
-                        ''',
-                        returnStatus: true
-                    )
-                    
-                    if (typeCheckResult != 0) {
-                        error("Type checking failed! Please fix type errors before merging.")
-                    } else {
-                        echo "✅ Type checking passed"
-                    }
-                }
-            }
-        }
-
-        stage('Run Tests') {
-            steps {
-                script {
-                    echo "🧪 Running tests..."
-                    def testResult = sh(
-                        script: '''
-                            if grep -q '"test"' package.json; then
-                                npm test
-                            else
-                                echo "⚠️ No test script found in package.json, skipping tests..."
-                                exit 0
-                            fi
-                        ''',
-                        returnStatus: true
-                    )
-                    
-                    if (testResult != 0) {
-                        error("Tests failed! Please fix failing tests before merging.")
-                    } else {
-                        echo "✅ Tests passed"
-                    }
-                }
-            }
-        }
-
-        stage('Configuration Validation') {
-            steps {
-                script {
-                    echo "⚙️ Validating configuration files..."
+                    echo "🔍 Validating configuration, dependencies, and code quality..."
                     sh '''
-                        # Check for common configuration files
-                        echo "Checking configuration files..."
+                        echo "=========================================="
+                        echo "Validation & Code Quality Checks"
+                        echo "=========================================="
                         
-                        # Check package.json exists
+                        # Configuration validation
+                        echo "⚙️ Validating configuration..."
                         if [ ! -f "package.json" ]; then
                             echo "❌ package.json not found!"
                             exit 1
                         fi
-                        
-                        # Validate JSON syntax using Node.js
-                        if command -v node &> /dev/null; then
-                            node -e "JSON.parse(require('fs').readFileSync('package.json'))" && echo "✅ package.json is valid JSON"
-                        else
-                            echo "⚠️ Cannot validate JSON (Node.js not available), but file exists"
-                        fi
-                        
-                        # Check for required build scripts in package.json
+                        node -e "JSON.parse(require('fs').readFileSync('package.json'))" && echo "✅ package.json is valid"
                         if ! grep -q '"build"' package.json; then
                             echo "❌ No build script found in package.json!"
                             exit 1
                         fi
-                        echo "✅ Build script found in package.json"
+                        echo "✅ Build script found"
                         
-                        # Check for environment files (if needed)
-                        if [ -f ".env.example" ] && [ ! -f ".env" ]; then
-                            echo "⚠️ Warning: .env.example exists but .env not found (this might be expected in CI)"
+                        # Security audit (non-blocking)
+                        echo ""
+                        echo "🔒 Running security audit..."
+                        npm audit --audit-level=moderate 2>&1 | head -20 || echo "⚠️ Security issues found (non-blocking)"
+                        
+                        # Code quality checks
+                        echo ""
+                        echo "🔍 Running code quality checks..."
+                        
+                        # Lint
+                        if grep -q '"lint"' package.json; then
+                            echo "  → Linting..."
+                            npm run lint || exit 1
+                            echo "  ✅ Linting passed"
                         fi
+                        
+                        # Type check
+                        if grep -q '"typescript"' package.json || [ -f tsconfig.json ]; then
+                            echo "  → Type checking..."
+                            if grep -q '"type-check"' package.json; then
+                                npm run type-check || exit 1
+                            else
+                                npx tsc --noEmit || exit 0
+                            fi
+                            echo "  ✅ Type checking passed"
+                        fi
+                        
+                        # Tests
+                        if grep -q '"test"' package.json; then
+                            echo "  → Running tests..."
+                            npm test || exit 1
+                            echo "  ✅ Tests passed"
+                        fi
+                        
+                        echo "=========================================="
                     '''
                 }
             }
         }
 
-        stage('Build') {
+        stage('Build & Validate') {
             steps {
                 script {
-                    echo "🔨 Building frontend application..."
-                    try {
-                        sh 'npm run build'
-                        echo "✅ Build completed successfully"
+                    echo "🔨 Building and validating for deployment..."
+                    sh '''
+                        echo "=========================================="
+                        echo "Build & Deployment Validation"
+                        echo "=========================================="
                         
-                        // Check if build output exists
-                        sh '''
-                            if [ -d "dist" ] || [ -d "build" ] || [ -d ".next" ]; then
-                                echo "✅ Build artifacts found"
-                            else
-                                echo "⚠️ Warning: No build output directory found"
-                            fi
-                        '''
-                    } catch (Exception e) {
-                        echo "❌ Build failed: ${e.message}"
-                        error("Build failed! Please check for configuration errors or missing dependencies.")
-                    }
+                        # Build
+                        echo "🔨 Building application..."
+                        npm run build || exit 1
+                        echo "✅ Build completed"
+                        
+                        # Validate build output
+                        echo ""
+                        echo "✅ Validating build output..."
+                        BUILD_DIR=""
+                        [ -d "dist" ] && BUILD_DIR="dist"
+                        [ -d "build" ] && BUILD_DIR="build"
+                        [ -d ".next" ] && BUILD_DIR=".next"
+                        
+                        if [ -z "$BUILD_DIR" ]; then
+                            echo "⚠️ Warning: No build output directory found"
+                        else
+                            echo "✅ Build directory: $BUILD_DIR"
+                            
+                            # Quick validation
+                            JS_FILES=$(find "$BUILD_DIR" -name "*.js" -type f 2>/dev/null | wc -l)
+                            [ "$JS_FILES" -gt 0 ] && echo "✅ JavaScript bundles found ($JS_FILES files)" || echo "⚠️ No JS files found"
+                            
+                            # Check for console.log in production (warning only)
+                            CONSOLE_LOGS=$(find "$BUILD_DIR" -name "*.js" -type f -exec grep -l "console\\.log" {} \\; 2>/dev/null | wc -l)
+                            [ "$CONSOLE_LOGS" -gt 0 ] && echo "⚠️ Warning: console.log found in $CONSOLE_LOGS files" || echo "✅ No console.log in build"
+                        fi
+                        
+                        echo "=========================================="
+                        echo "✅ Build validation passed - Ready to deploy!"
+                        echo "=========================================="
+                    '''
                 }
             }
         }
@@ -430,11 +393,12 @@ pipeline {
                 echo "=========================================="
                 echo "✅ ALL CHECKS PASSED - READY TO MERGE!"
                 echo "=========================================="
-                echo "✅ Linting: Passed"
-                echo "✅ Type Check: Passed"
-                echo "✅ Tests: Passed"
-                echo "✅ Build: Passed"
-                echo "✅ Configuration: Valid"
+                echo "✅ Configuration & Dependencies: Validated"
+                echo "✅ Code Quality (Lint/Type/Tests): Passed"
+                echo "✅ Build & Deployment: Validated"
+                echo "=========================================="
+                echo ""
+                echo "🎉 This PR is safe to merge and deploy!"
                 echo "=========================================="
                 
                 // Update GitHub PR status to success
@@ -454,10 +418,23 @@ pipeline {
                 echo "=========================================="
                 echo "❌ PIPELINE FAILED - DO NOT MERGE!"
                 echo "=========================================="
-                echo "Please fix the following issues:"
-                echo "- Check the stage that failed above"
-                echo "- Fix linting errors, test failures, or build issues"
-                echo "- Push new commits to re-trigger the pipeline"
+                echo ""
+                echo "🚫 This PR contains issues that will break deployment:"
+                echo ""
+                echo "Common issues to check:"
+                echo "  ❌ Broken imports or missing dependencies"
+                echo "  ❌ Linting errors"
+                echo "  ❌ Type errors"
+                echo "  ❌ Test failures"
+                echo "  ❌ Build failures"
+                echo "  ❌ Configuration issues"
+                echo "  ❌ Invalid build output"
+                echo ""
+                echo "📋 Next steps:"
+                echo "  1. Check the failed stage above for details"
+                echo "  2. Fix the reported issues"
+                echo "  3. Push new commits to re-trigger the pipeline"
+                echo ""
                 echo "=========================================="
                 
                 // Update GitHub PR status to failure
