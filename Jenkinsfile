@@ -1,31 +1,44 @@
 pipeline {
     agent any
-    
+
     tools {
-        nodejs "node22"
-    }
-
-    environment {
-        GIT_CREDENTIALS_ID = 'frontend-pr'
-        GITHUB_REPO = 'demo-frontend'
-    }
-
-    options {
-        skipDefaultCheckout false
-        timeout(time: 15, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        nodejs "node18"
     }
 
     stages {
-        // We'll add stages step by step here
-    }
-
-    post {
-        success {
-            echo "✅ Pipeline completed successfully"
+        stage('Verify Node.js') {
+            steps {
+                sh 'node -v'
+                sh 'npm -v'
+            }
         }
-        failure {
-            echo "❌ Pipeline failed"
+
+        stage('Create .npmrc') {
+            steps {
+                withCredentials([string(credentialsId: 'NPM_RC', variable: 'NPM_RC_TOKEN')]) {
+                    sh '''
+                        echo "@fortawesome:registry=https://npm.fontawesome.com/" > .npmrc
+                        echo "//npm.fontawesome.com/:_authToken=${NPM_RC_TOKEN}" >> .npmrc
+                    '''
+                }
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm install'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'npm run build'
+            }
+        }
+
+        stage('Run App') {
+            steps {
+                sh 'npm start'
+            }
         }
     }
 }
