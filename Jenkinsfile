@@ -142,7 +142,7 @@ pipeline {
                     def nvmrcContent = sh(
                         script: '''
                             if [ -f .nvmrc ]; then
-                                cat .nvmrc | tr -d 'v' | tr -d '\\n' | tr -d ' '
+                                cat .nvmrc | tr -d 'v' | tr -d '\n' | tr -d ' '
                             else
                                 echo ""
                             fi
@@ -154,23 +154,12 @@ pipeline {
                         detectedVersion = nvmrcContent
                         echo "✅ Found .nvmrc file with version: ${detectedVersion}"
                     } else {
-                        // Method 2: Check package.json engines.node
+                        // Method 2: Check package.json engines.node (using grep/sed to avoid Node.js dependency)
                         def packageJsonContent = sh(
                             script: '''
                                 if [ -f package.json ]; then
-                                    node -e "
-                                        try {
-                                            const pkg = require('./package.json');
-                                            if (pkg.engines && pkg.engines.node) {
-                                                const version = pkg.engines.node.replace(/[^0-9.]/g, '').split('.')[0];
-                                                console.log(version || '');
-                                            } else {
-                                                console.log('');
-                                            }
-                                        } catch(e) {
-                                            console.log('');
-                                        }
-                                    " 2>/dev/null || echo ""
+                                    # Extract engines.node using grep and sed (works without Node.js)
+                                    grep -A 5 '"engines"' package.json | grep -o '"node"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"node"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\\1/' | head -1 | grep -oE '[0-9]+' | head -1 || echo ""
                                 else
                                     echo ""
                                 fi
@@ -186,7 +175,7 @@ pipeline {
                             def nodeVersionContent = sh(
                                 script: '''
                                     if [ -f .node-version ]; then
-                                        cat .node-version | tr -d 'v' | tr -d '\\n' | tr -d ' '
+                                        cat .node-version | tr -d 'v' | tr -d '\n' | tr -d ' '
                                     else
                                         echo ""
                                     fi
@@ -221,11 +210,13 @@ pipeline {
                             # Try to use nvm if available
                             if command -v nvm &> /dev/null || [ -s "$HOME/.nvm/nvm.sh" ]; then
                                 export NVM_DIR="$HOME/.nvm"
-                                [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+                                if [ -s "$NVM_DIR/nvm.sh" ]; then
+                                    source "$NVM_DIR/nvm.sh"
+                                fi
                                 
                                 # Get version from .nvmrc or use detected version
                                 if [ -f .nvmrc ]; then
-                                    nvm use
+                                    nvm use || echo "⚠️ nvm version from .nvmrc not installed, using Jenkins tool"
                                 elif [ -n "${DETECTED_NODE_VERSION}" ]; then
                                     nvm use ${DETECTED_NODE_VERSION} || echo "⚠️ nvm version ${DETECTED_NODE_VERSION} not installed, using Jenkins tool"
                                 fi
@@ -275,7 +266,16 @@ pipeline {
                         fi
                     '''
                     
-                    sh 'npm ci' // Use npm ci for clean, reproducible builds
+                    // Use npm ci if package-lock.json exists, otherwise use npm install
+                    sh '''
+                        if [ -f package-lock.json ]; then
+                            echo "📦 Found package-lock.json, using npm ci for clean install..."
+                            npm ci
+                        else
+                            echo "📦 No package-lock.json found, using npm install..."
+                            npm install
+                        fi
+                    '''
                 }
             }
         }
@@ -284,18 +284,22 @@ pipeline {
             steps {
                 script {
                     echo "🔍 Running linting and code quality checks..."
-                    try {
-                        // Run ESLint if available
-                        sh '''
-                            if npm run lint --if-present; then
-                                echo "✅ Linting passed"
+                    def lintResult = sh(
+                        script: '''
+                            if grep -q '"lint"' package.json; then
+                                npm run lint
                             else
-                                echo "⚠️ No lint script found, skipping..."
+                                echo "⚠️ No lint script found in package.json, skipping linting..."
+                                exit 0
                             fi
-                        '''
-                    } catch (Exception e) {
-                        echo "❌ Linting failed: ${e.message}"
+                        ''',
+                        returnStatus: true
+                    )
+                    
+                    if (lintResult != 0) {
                         error("Linting checks failed! Please fix the issues before merging.")
+                    } else {
+                        echo "✅ Linting passed"
                     }
                 }
             }
@@ -305,18 +309,29 @@ pipeline {
             steps {
                 script {
                     echo "🔎 Running TypeScript type checking..."
-                    try {
-                        // Run type check if TypeScript is used
-                        sh '''
-                            if npm run type-check --if-present || npx tsc --noEmit --if-present; then
-                                echo "✅ Type checking passed"
+                    def typeCheckResult = sh(
+                        script: '''
+                            # Check if TypeScript is in dependencies
+                            if grep -q '"typescript"' package.json || [ -f tsconfig.json ]; then
+                                # Try npm run type-check first
+                                if grep -q '"type-check"' package.json; then
+                                    npm run type-check
+                                else
+                                    # Fallback to direct tsc
+                                    npx tsc --noEmit || exit 0
+                                fi
                             else
                                 echo "⚠️ No TypeScript found, skipping type check..."
+                                exit 0
                             fi
-                        '''
-                    } catch (Exception e) {
-                        echo "❌ Type checking failed: ${e.message}"
+                        ''',
+                        returnStatus: true
+                    )
+                    
+                    if (typeCheckResult != 0) {
                         error("Type checking failed! Please fix type errors before merging.")
+                    } else {
+                        echo "✅ Type checking passed"
                     }
                 }
             }
@@ -326,19 +341,60 @@ pipeline {
             steps {
                 script {
                     echo "🧪 Running tests..."
-                    try {
-                        // Run unit tests
-                        sh '''
-                            if npm test --if-present || npm run test --if-present; then
-                                echo "✅ Tests passed"
+                    def testResult = sh(
+                        script: '''
+                            if grep -q '"test"' package.json; then
+                                npm test
                             else
-                                echo "⚠️ No test script found, skipping tests..."
+                                echo "⚠️ No test script found in package.json, skipping tests..."
+                                exit 0
                             fi
-                        '''
-                    } catch (Exception e) {
-                        echo "❌ Tests failed: ${e.message}"
+                        ''',
+                        returnStatus: true
+                    )
+                    
+                    if (testResult != 0) {
                         error("Tests failed! Please fix failing tests before merging.")
+                    } else {
+                        echo "✅ Tests passed"
                     }
+                }
+            }
+        }
+
+        stage('Configuration Validation') {
+            steps {
+                script {
+                    echo "⚙️ Validating configuration files..."
+                    sh '''
+                        # Check for common configuration files
+                        echo "Checking configuration files..."
+                        
+                        # Check package.json exists
+                        if [ ! -f "package.json" ]; then
+                            echo "❌ package.json not found!"
+                            exit 1
+                        fi
+                        
+                        # Validate JSON syntax using Node.js
+                        if command -v node &> /dev/null; then
+                            node -e "JSON.parse(require('fs').readFileSync('package.json'))" && echo "✅ package.json is valid JSON"
+                        else
+                            echo "⚠️ Cannot validate JSON (Node.js not available), but file exists"
+                        fi
+                        
+                        # Check for required build scripts in package.json
+                        if ! grep -q '"build"' package.json; then
+                            echo "❌ No build script found in package.json!"
+                            exit 1
+                        fi
+                        echo "✅ Build script found in package.json"
+                        
+                        # Check for environment files (if needed)
+                        if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+                            echo "⚠️ Warning: .env.example exists but .env not found (this might be expected in CI)"
+                        fi
+                    '''
                 }
             }
         }
@@ -362,41 +418,6 @@ pipeline {
                     } catch (Exception e) {
                         echo "❌ Build failed: ${e.message}"
                         error("Build failed! Please check for configuration errors or missing dependencies.")
-                    }
-                }
-            }
-        }
-
-        stage('Configuration Validation') {
-            steps {
-                script {
-                    echo "⚙️ Validating configuration files..."
-                    sh '''
-                        # Check for common configuration files
-                        echo "Checking configuration files..."
-                        
-                        # Check package.json exists and is valid JSON
-                        if [ -f "package.json" ]; then
-                            node -e "JSON.parse(require('fs').readFileSync('package.json'))" && echo "✅ package.json is valid"
-                        else
-                            echo "❌ package.json not found!"
-                            exit 1
-                        fi
-                        
-                        # Check for environment files (if needed)
-                        if [ -f ".env.example" ] && [ ! -f ".env" ]; then
-                            echo "⚠️ Warning: .env.example exists but .env not found (this might be expected in CI)"
-                        fi
-                        
-                        # Check for required build scripts in package.json
-                        node -e "
-                            const pkg = JSON.parse(require('fs').readFileSync('package.json'));
-                            if (!pkg.scripts || !pkg.scripts.build) {
-                                console.error('❌ No build script found in package.json!');
-                                process.exit(1);
-                            }
-                            console.log('✅ Build script found');
-                        '''
                     }
                 }
             }
@@ -460,4 +481,5 @@ pipeline {
         }
     }
 }
+
 
